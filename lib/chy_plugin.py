@@ -5,9 +5,9 @@ all = {}
 
 def load(folder):
     load_count = 0
-    folder = os.path.abspath(folder)
     if os.path.isdir(folder):
-        sys.path.insert(0, '.')
+        folder = os.path.abspath(folder)
+        sys.path.insert(0, folder)
         try:
             global all
             for item in os.listdir(folder):

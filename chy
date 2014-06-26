@@ -1,6 +1,23 @@
 #! /usr/bin/env python
 
+import os, sys
+
 from lib import *
 
+def handle_target(target, args):
+    exit_code = 0
+    target_type = None
+    if os.path.isdir(target):
+        target_type = 'dir'
+    elif os.path.isfile(target):
+        target_type = 'file'
+    else:
+        exit_code += chy_log.report_error('%s not found.' % target)
+        return
+
 if __name__ == '__main__':
+    exit_code = 0
     args = chy_cmdline.process()
+    for target in args.targets:
+        exit_code += handle_target(target, args)
+    sys.exit(exit_code)
