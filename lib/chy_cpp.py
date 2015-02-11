@@ -11,18 +11,31 @@ MASK_C_COMMENTS = 2
 MASK_LITERALS = 3
 MASK_IF_0 = 4
 
+'''
+
+'''
 region = collections.namedtuple('region', ['begin', 'end', 'line_num', 'region_type', 'hash_start_line_num'])
 
-class _region_parse_state:
+class _parse_state:
     def __init__(self, txt):
         self.txt = txt
         self.i = 0
         self.end = len(txt)
         self.regions = []
-        self.func = _default_state
+        self.func = _code_region
         self.line_num = 1
+    def log(self):
+        name = 'None'
+        if self.func:
+            name = self.func.func_name
+        print('In %s at index %s (line %s, %s...)' % (name, self.i, self.line_num, repr(self.txt[self.i:self.i+3])))
 
-def _double_quote(state):
+def _save_region(state, end, region_type, hash_line_num=None):
+    state.regions.append(region(state.i, end, state.line_num, region_type, hash_line_num))
+    state.i = end
+
+def _double_quote_region(state):
+    state.log()
     i = state.i + 1
     while i < state.end:
         c = state.txt[i]
@@ -38,26 +51,17 @@ def _double_quote(state):
     if i >= state.end:
         state.func = None
     else:
-        state.func = _default_state
-    state.regions.append(region(state.i, i, state.line_num, '"', None))
-    state.i = i
-
-def expect_state(state, idx, region_count, new_func, line_num):
-    expect_eq(idx, state.i)
-    expect_eq(region_count, len(state.regions))
-    expect_eq(new_func, state.func)
-    expect_eq(line_num, state.line_num)
-
-def test_double_quote():
-    state = _region_parse_state('"hello, world"')
-    _double_quote(state)
-    expect_state(state, len(state.txt), 1, _default_state, 1)
-
-    state = _region_parse_state('"hi" is what she said')
-    _double_quote(state)
-    expect_state(state, 4, 1, _default_state, 1)
-
-def _default_state(state):
+        state.func = _code_region
+    _save_region(state, i, '"')
+    
+def _save_code_region_if_not_empty(state, end):
+    if end > state.i:
+        _save_region(state, end, 'code')
+    else:
+        print('Empty code region at index %s (line %s, %s...)' % (state.i, state.line_num, repr(state.txt[state.i:state.i+3])))
+    
+def _code_region(state):
+    state.log()
     # Use a temporary idx until we know we have to hand control to another func.
     i = state.i
 
@@ -73,12 +77,19 @@ def _default_state(state):
             next_chunk = state.txt[i:i+80]
             m = _hash_block_pat.match(next_chunk)
             if m:
+                i += m.start()
+                print('m.start(1) = %d, state.i = %d' % (m.start(1), state.i))
+                _save_code_region_if_not_empty(state, i)
                 i = _find_end_of_condition(state.txt, m, i)
-                state.regions.append(region(m.start(1), i, state.line_num, '#%s' % m.group(2), state.line_num))
+                _save_region(state, i, '#%s' % m.group(2), state.line_num)
+                if i >= state.end:
+                    state.func = None
+                    break
 
         c = state.txt[i]
         if c == '"':
-            state.func = _double_quote
+            _save_code_region_if_not_empty(state, i)
+            state.func = _double_quote_region
             break
         elif c == "'":
             i += 2
@@ -89,20 +100,24 @@ def _default_state(state):
         elif c == '/':
             second = state.txt[i + 1]
             if second == '/':
-                state.i = i
+                _save_code_region_if_not_empty(state, i)
                 i = state.txt.find('\n', i + 2)
                 if i == -1:
                     i = state.end
-                state.regions.append(region(state.i, i, state.line_num, '//', None))
+                else:
+                    i += 1
+                _save_region(state, i, '//')
+                state.line_num += 1
             elif second == '*':
-                state.i = i
+                _save_code_region_if_not_empty(state, i)
+                x = state.i
                 i = state.txt.find('*/', i + 2)
                 if i == -1:
                     i = state.end
                 else:
                     i += 2
-                state.regions.append(region(state.i, i, state.line_num, '/*', None))
-                state.line_num += state.txt[state.i + 2:i - 2].count('\n')
+                _save_region(state, i, '/*')
+                state.line_num += state.txt[x:i].count('\n')
             else:
                 i += 1
         elif c == '\n':
@@ -112,18 +127,11 @@ def _default_state(state):
         else:
             i += 1
         if i >= state.end:
+            _save_code_region_if_not_empty(state, i)
             state.func = None
+            state.log()
             break
     state.i = i
-
-def test_default_state():
-    state = _region_parse_state('x = 1\ny=z;')
-    _default_state(state)
-    expect_state(state, len(state.txt), 0, _default_state, 2)
-
-    state = _region_parse_state('"hi" is what she said')
-    _double_quote(state)
-    expect_state(state, 4, 1, _default_state, 1)
 
 def _find_end_of_condition(txt, m, offset = 0):
     end = m.end() + offset
@@ -136,7 +144,8 @@ def _find_end_of_condition(txt, m, offset = 0):
             j = k
         if j != -1:
             return m.end() + j
-        return i
+        # Consume line break to avoid clutter
+        return i + 1
     else:
         j = txt.find('//', end)
         k = txt.find('/*', end)
@@ -146,53 +155,20 @@ def _find_end_of_condition(txt, m, offset = 0):
             return j
     return len(txt)
 
-def test_find_end_of_condition():
-    txt = '#if GCC_VERSION > 4.2\ndo something'
-    m = _hash_block_pat.search(txt)
-    expect_eq(21, _find_end_of_condition(txt, m))
-
-    txt = '#ifdef foo // comment\n#include x'
-    m = _hash_block_pat.search(txt)
-    expect_eq(11, _find_end_of_condition(txt, m))
-
-    txt = '#ifdef foo/* comment\n#include x*/'
-    m = _hash_block_pat.search(txt)
-    expect_eq(10, _find_end_of_condition(txt, m))
-
 def find_code_regions(txt):
     '''
     Break C/C++ code into logical regions based on a simple scan. This allows
     processors to correctly parse string literals, comments, and #ifdefs without
     becoming confused and without re-inventing the wheel.
+    
+    A region 
+    
+    @return a list of region tuples (begin, end, line_num, region_type, hash_start_line_num).
     '''
-    state = _region_parse_state(txt)
+    state = _parse_state(txt)
     while state.func and (state.i < state.end):
         state.func(state)
     return state.regions
-
-def test_find_code_regions():
-    sample_c_code = '''
-#ifndef foo_h // comment with "quoted" string
-#define foo_h
-
-const char * txt = "abc\\"\\n/*xyz*/ is //";
-#if 0
-int x = 0;
-void do_something() {
-    // insert body here
-};
-#else
-template <class T>
-class foo /* not bar */ {
-public: //expose everthing
-    foo();
-};
-#endif
-
-#endif
-'''
-    x = find_code_regions(sample_c_code)
-    print(x)
 
 def mask(txt, mask_bitmask):
     '''
@@ -202,15 +178,16 @@ def mask(txt, mask_bitmask):
     '''
     pass
 
-def expect_eq(expected, actual):
-    if expected != actual:
-        raise AssertionError('%s != %s' % (expected, actual))
-
 if __name__ == '__main__':
-    test_find_code_regions()
-    test_funcs = [x for x in globals().keys() if x.startswith('test_')]
-    for func in test_funcs:
-        print(func)
-        func = globals()[func]
-        func()
+    import os, sys
+    if len(sys.argv) == 2 and not re.match('-?-h(elp)?', sys.argv[1]):
+        with open(sys.argv[1], 'r') as f:
+            txt = f.read()
+        regions = find_code_regions(txt)
+        i = 0
+        for r in regions:
+            print('%s: %s' % (i, r))
+            i += 1
+    else:
+        print('python %s FNAME -- print code regions in FNAME.' % os.path.split(__file__)[1])
 
