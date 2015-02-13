@@ -25,6 +25,7 @@ class _parse_state:
         self.func = _code_region
         self.line_num = 1
     def log(self):
+        return
         name = 'None'
         if self.func:
             name = self.func.func_name
@@ -57,8 +58,6 @@ def _double_quote_region(state):
 def _save_code_region_if_not_empty(state, end):
     if end > state.i:
         _save_region(state, end, 'code')
-    else:
-        print('Empty code region at index %s (line %s, %s...)' % (state.i, state.line_num, repr(state.txt[state.i:state.i+3])))
     
 def _code_region(state):
     state.log()
@@ -77,8 +76,6 @@ def _code_region(state):
             next_chunk = state.txt[i:i+80]
             m = _hash_block_pat.match(next_chunk)
             if m:
-                i += m.start()
-                print('m.start(1) = %d, state.i = %d' % (m.start(1), state.i))
                 _save_code_region_if_not_empty(state, i)
                 i = _find_end_of_condition(state.txt, m, i)
                 _save_region(state, i, '#%s' % m.group(2), state.line_num)
@@ -143,7 +140,7 @@ def _find_end_of_condition(txt, m, offset = 0):
         if k > -1 and (k < j or j == -1):
             j = k
         if j != -1:
-            return m.end() + j
+            return m.end() + offset + j
         # Consume line break to avoid clutter
         return i + 1
     else:
@@ -170,13 +167,67 @@ def find_code_regions(txt):
         state.func(state)
     return state.regions
 
-def mask(txt, mask_bitmask):
+def _get_maskable_range(r):
+    if r.region_type == '//':
+        return r.begin + 2, r.end
+    elif r.region_type == '/*':
+        return r.begin + 2, r.end - 2
+    elif r.region_type == '"':
+        return r.begin + 1, r.end - 1
+    elif r.region_type == '#':
+        m = _hash_block_pat.match(txt[r.begin:])
+        assert m
+        return r.begin + m.end(1)
+    else:
+        return r.begin, r.end
+
+def _mask_regions_of_type(txt, regions, region_type, mask_char):
+    for r in regions:
+        if r.region_type == region_type:
+            begin, end = _get_maskable_range(r)
+            prefix = txt[0:begin]
+            suffix = txt[end:]
+            infix = ''
+            for i in xrange(begin, end):
+                c = txt[i]
+                if c != '\n':
+                    c = mask_char
+                infix += c
+            txt = prefix + infix + suffix
+    return txt
+
+mask_code = 1
+mask_c_comments = 2
+mask_cpp_comments = 4
+mask_strings = 8
+mask_conditions = 16
+
+code_mask_char = '-'
+c_comments_mask_char = '*'
+cpp_comments_mask_char = '/'
+strings_mask_char = '.'
+conditions_mask_char = 'X'
+default_mask_chars = code_mask_char + comments_mask_char + strings_mask_char + conditions_mask_char
+
+def mask(txt, mask_bitmask, mask_chars=default_mask_chars):
     '''
-    Remove comments without altering line numbers (multiline comments
-    are replaced by the same number of line breaks). Replace string
-    literals with
+    Hide some aspects of code using a char that replaces so regex and search/replace operations won't
+    be confused. Line numbers are preserved.
     '''
-    pass
+    if not mask_bitmask:
+        return txt
+    regions = find_code_regions(txt)
+    if mask_chars & mask_code:
+        txt = _mask_regions_of_type(txt, regions, 'code', mask_chars[0])
+    if mask_chars & mask_c_comments:
+        txt = _mask_regions_of_type(txt, regions, '/*', mask_chars[1])
+    if mask_chars & mask_cpp_comments:
+        txt = _mask_regions_of_type(txt, regions, '//', mask_chars[2])
+    if mask_chars & mask_strings:
+        txt = _mask_regions_of_type(txt, regions, '"', mask_chars[3])
+    if mask_chars & mask_conditions:
+        txt = _mask_regions_of_type(txt, regions, '#', mask_chars[4])
+    return txt
 
 if __name__ == '__main__':
     import os, sys
